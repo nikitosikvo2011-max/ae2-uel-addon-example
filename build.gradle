@@ -1,0 +1,396 @@
+//version: 1704659416
+/*
+ * DO NOT CHANGE THIS FILE!
+ * Also, you may replace this file at any time if there is an update available.
+ * Please check https://github.com/GregTechCEu/Buildscripts/blob/master/build.gradle for updates.
+ * You can also run ./gradlew updateBuildScript to update your buildscript.
+ */
+
+import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
+import com.gtnewhorizons.retrofuturagradle.mcp.ReobfuscatedJar
+import org.gradle.api.tasks.testing.logging.TestExceptionFormat
+import org.gradle.api.tasks.testing.logging.TestLogEvent
+import org.gradle.internal.logging.text.StyledTextOutputFactory
+import org.jetbrains.gradle.ext.Gradle
+
+import static org.gradle.internal.logging.text.StyledTextOutput.Style
+
+plugins {
+    id 'java'
+    id 'java-library'
+    id 'base'
+    id 'eclipse'
+    id 'maven-publish'
+    id 'org.jetbrains.gradle.plugin.idea-ext' version '1.1.7'
+    id 'com.gtnewhorizons.retrofuturagradle' version '1.4.9'
+}
+
+def out = services.get(StyledTextOutputFactory).create('an-output')
+
+// Required properties validation
+checkPropertyExists("modName")
+checkPropertyExists("modId")
+checkPropertyExists("modGroup")
+checkPropertyExists("minecraftVersion")
+checkPropertyExists("apiPackage")
+checkPropertyExists("accessTransformersFile")
+checkPropertyExists("usesMixins")
+checkPropertyExists("mixinsPackage")
+checkPropertyExists("coreModClass")
+checkPropertyExists("containsMixinsAndOrCoreModOnly")
+
+// Optional properties defaults
+propertyDefaultIfUnset("modVersion", "1.0.0")
+propertyDefaultIfUnset("includeMCVersionJar", false)
+propertyDefaultIfUnset("autoUpdateBuildScript", false)
+propertyDefaultIfUnset("modArchivesBaseName", project.modId)
+propertyDefaultIfUnsetWithEnvVar("developmentEnvironmentUserName", "Developer", "DEV_USERNAME")
+propertyDefaultIfUnset("generateGradleTokenClass", "")
+propertyDefaultIfUnset("gradleTokenModId", "")
+propertyDefaultIfUnset("gradleTokenModName", "")
+propertyDefaultIfUnset("gradleTokenVersion", "")
+propertyDefaultIfUnset("useSrcApiPath", true)
+propertyDefaultIfUnset("includeWellKnownRepositories", true)
+propertyDefaultIfUnset("includeCommonDevEnvMods", true)
+propertyDefaultIfUnset("noPublishedSources", false)
+propertyDefaultIfUnset("forceEnableMixins", false)
+propertyDefaultIfUnsetWithEnvVar("enableCoreModDebug", false, "CORE_MOD_DEBUG")
+propertyDefaultIfUnset("generateMixinConfig", true)
+propertyDefaultIfUnset("usesShadowedDependencies", false)
+propertyDefaultIfUnset("minimizeShadowedDependencies", true)
+propertyDefaultIfUnset("relocateShadowedDependencies", true)
+propertyDefaultIfUnset("separateRunDirectories", false)
+propertyDefaultIfUnset("versionDisplayFormat", '\$MOD_NAME - \$VERSION')
+propertyDefaultIfUnsetWithEnvVar("modrinthProjectId", "", "MODRINTH_PROJECT_ID")
+propertyDefaultIfUnset("modrinthRelations", "")
+propertyDefaultIfUnsetWithEnvVar("curseForgeProjectId", "", "CURSEFORGE_PROJECT_ID")
+propertyDefaultIfUnset("curseForgeRelations", "")
+propertyDefaultIfUnsetWithEnvVar("releaseType", "release", "RELEASE_TYPE")
+propertyDefaultIfUnset("generateDefaultChangelog", false)
+propertyDefaultIfUnset("customMavenPublishUrl", "")
+propertyDefaultIfUnset("enableModernJavaSyntax", true)
+propertyDefaultIfUnset("enableSpotless", false)
+propertyDefaultIfUnset("enableJUnit", true)
+propertyDefaultIfUnsetWithEnvVar("deploymentDebug", false, "DEPLOYMENT_DEBUG")
+
+// Project configuration
+final String javaSourceDir = 'src/main/java/'
+final String modGroupPath = modGroup.toString().replace('.' as char, '/' as char)
+final String apiPackagePath = apiPackage.toString().replace('.' as char, '/' as char)
+
+String targetPackageJava = javaSourceDir + modGroupPath
+if (!getFile(targetPackageJava).exists()) {
+    throw new GradleException("Could not resolve \"modGroup\"! Could not find ${targetPackageJava}")
+}
+
+if (accessTransformersFile) {
+    String targetFile = 'src/main/resources/' + accessTransformersFile.trim()
+    if (!getFile(targetFile).exists()) {
+        throw new GradleException("Could not resolve \"accessTransformersFile\"! Could not find " + targetFile)
+    }
+    tasks.deobfuscateMergedJarToSrg.accessTransformerFiles.from(targetFile)
+    tasks.srgifyBinpatchedJar.accessTransformerFiles.from(targetFile)
+}
+
+// Java configuration
+java {
+    toolchain {
+        if (enableModernJavaSyntax.toBoolean()) {
+            languageVersion.set(JavaLanguageVersion.of(17))
+        } else {
+            languageVersion.set(JavaLanguageVersion.of(8))
+        }
+        vendor.set(JvmVendorSpec.AZUL)
+    }
+    if (!noPublishedSources.toBoolean()) {
+        withSourcesJar()
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+
+    if (enableModernJavaSyntax.toBoolean()) {
+        if (it.name in ['compileMcLauncherJava', 'compilePatchedMcJava']) {
+            return
+        }
+        sourceCompatibility = 17
+        options.release.set(8)
+        javaCompiler.set(javaToolchains.compilerFor {
+            languageVersion.set(JavaLanguageVersion.of(17))
+            vendor.set(JvmVendorSpec.AZUL)
+        })
+    }
+}
+
+// Minecraft configuration
+if (!modVersion) {
+    modVersion = '1.0.0'
+}
+
+if (includeMCVersionJar.toBoolean()){
+    version = "${minecraftVersion}-${modVersion}"
+} else {
+    version = modVersion
+}
+
+group = modGroup
+
+base {
+    archivesName = modArchivesBaseName
+}
+
+minecraft {
+    mcVersion = minecraftVersion
+    username = developmentEnvironmentUserName.toString()
+    useDependencyAccessTransformers = true
+
+    if (gradleTokenModId) {
+        injectedTags.put gradleTokenModId, modId
+    }
+    if (gradleTokenModName) {
+        injectedTags.put gradleTokenModName, modName
+    }
+    if (gradleTokenVersion) {
+        injectedTags.put gradleTokenVersion, modVersion
+    }
+
+    extraRunJvmArguments.add("-ea:${modGroup}")
+}
+
+if (generateGradleTokenClass) {
+    tasks.injectTags.outputClassName.set(generateGradleTokenClass)
+}
+
+tasks.named('processIdeaSettings').configure {
+    dependsOn('injectTags')
+}
+
+// Repositories
+repositories.configureEach { repo ->
+    if (repo instanceof UrlArtifactRepository) {
+        if (repo.getUrl() != null && repo.getUrl().getScheme() == "http" && !repo.allowInsecureProtocol) {
+            logger.warn("Deprecated: Allowing insecure connections for repo '${repo.name}'")
+            repo.allowInsecureProtocol = true
+        }
+    }
+}
+
+repositories {
+    if (includeWellKnownRepositories.toBoolean()) {
+        maven {
+            name 'Cleanroom Maven'
+            url 'https://maven.cleanroommc.com'
+        }
+        maven {
+            name 'BlameJared Maven'
+            url 'https://maven.blamejared.com'
+        }
+        maven {
+            name 'GTNH Maven'
+            url 'https://nexus.gtnewhorizons.com/repository/public/'
+        }
+    }
+    mavenLocal()
+}
+
+// Dependencies configuration
+configurations {
+    embed
+    implementation.extendsFrom(embed)
+}
+
+dependencies {
+    // AE2 UEL API - Update version as needed
+    compileOnly 'curse.maven:ae2-extended-life-570458:6302101'
+
+    // JEI for development
+    if (includeCommonDevEnvMods.toBoolean()) {
+        implementation 'mezz.jei:jei_1.12.2:4.16.1.302'
+    }
+
+    // Jetbrains annotations
+    compileOnlyApi 'org.jetbrains:annotations:24.1.0'
+    annotationProcessor 'org.jetbrains:annotations:24.1.0'
+
+    // Minecraft launcher wrapper
+    patchedMinecraft('net.minecraft:launchwrapper:1.17.4') {
+        transitive = false
+    }
+
+    // JUnit for testing
+    if (enableJUnit.toBoolean()) {
+        testImplementation 'org.hamcrest:hamcrest:2.2'
+        testImplementation 'org.junit.jupiter:junit-jupiter:5.9.2'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    }
+}
+
+// Test configuration
+sourceSets {
+    test {
+        java {
+            compileClasspath += patchedMc.output + mcLauncher.output
+            runtimeClasspath += patchedMc.output + mcLauncher.output
+        }
+    }
+}
+
+test {
+    javaLauncher = javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(8)
+    }.get()
+
+    testLogging {
+        events TestLogEvent.STARTED, TestLogEvent.PASSED, TestLogEvent.FAILED
+        exceptionFormat TestExceptionFormat.FULL
+        showExceptions true
+        showStackTraces true
+        showCauses true
+    }
+
+    if (enableJUnit.toBoolean()) {
+        useJUnitPlatform()
+    }
+}
+
+// Resource processing
+processResources {
+    inputs.property 'version', modVersion
+    inputs.property 'mcversion', minecraftVersion
+
+    exclude('spotless.importorder')
+    exclude('spotless.eclipseformat.xml')
+
+    filesMatching('mcmod.info') { fcd ->
+        fcd.expand(
+                'version': modVersion,
+                'mcversion': minecraftVersion,
+                'modid': modId,
+                'modname': modName
+        )
+    }
+
+    if (accessTransformersFile) {
+        String[] ats = accessTransformersFile.split(',')
+        ats.each { at ->
+            rename "(${at})", 'META-INF/\$1'
+        }
+    }
+}
+
+// Generate default assets
+tasks.register('generateAssets') {
+    group = 'GT Buildscript'
+    description = 'Generates pack.mcmeta, mcmod.info if needed'
+    doLast {
+        def packMcmetaFile = getFile('src/main/resources/pack.mcmeta')
+        if (!packMcmetaFile.exists()) {
+            packMcmetaFile.text = """{
+  "pack": {
+    "pack_format": 3,
+    "description": "${modName} Resource Pack"
+  }
+}
+"""
+        }
+
+        def mcmodInfoFile = getFile('src/main/resources/mcmod.info')
+        if (!mcmodInfoFile.exists()) {
+            mcmodInfoFile.text = """[{
+    "modid": "\${modid}",
+    "name": "\${modname}",
+    "description": "Addon for AE2 Unofficial Extended Life",
+    "version": "\${version}",
+    "mcversion": "\${mcversion}",
+    "logoFile": "",
+    "url": "https://github.com/nikitosikvo2011-max/ae2-uel-addon-example",
+    "authorList": ["Your Name"],
+    "credits": "",
+    "dependencies": ["ae2-extended-life"]
+}]
+"""
+        }
+    }
+}
+
+tasks.named('processResources').configure {
+    dependsOn('generateAssets')
+}
+
+// JAR building
+jar {
+    manifest {
+        attributes(
+            'Manifest-Version': '1.0',
+            'Implementation-Title': modName,
+            'Implementation-Version': modVersion,
+            'Implementation-Vendor': modGroup
+        )
+    }
+
+    from provider {
+        configurations.embed.collect {
+            it.isDirectory() ? it : zipTree(it)
+        }
+    }
+}
+
+// Create API jar
+tasks.register('apiJar', Jar) {
+    archiveClassifier.set 'api'
+    if (useSrcApiPath) {
+        from(sourceSets.api.java) {
+            include "${modGroupPath}/${apiPackagePath}/**"
+        }
+        from(sourceSets.api.output) {
+            include "${modGroupPath}/${apiPackagePath}/**"
+        }
+    } else {
+        from(sourceSets.main.java) {
+            include "${modGroupPath}/${apiPackagePath}/**"
+        }
+        from(sourceSets.main.output) {
+            include "${modGroupPath}/${apiPackagePath}/**"
+        }
+    }
+}
+
+// IDE configuration
+eclipse {
+    classpath {
+        downloadSources = true
+        downloadJavadoc = true
+    }
+}
+
+idea {
+    module {
+        inheritOutputDirs true
+        downloadJavadoc true
+        downloadSources true
+    }
+    project {
+        settings {
+            runConfigurations {
+                '1. Setup Workspace'(Gradle) {
+                    taskNames = ['setupDecompWorkspace']
+                }
+                '2. Run Client'(Gradle) {
+                    taskNames = ['runClient']
+                }
+                '3. Run Server'(Gradle) {
+                    taskNames = ['runServer']
+                }
+                '4. Build Jars'(Gradle) {
+                    taskNames = ['build']
+                }
+            }
+            compiler.javac {
+                afterEvaluate {
+                    javacAdditionalOptions = '-encoding utf8'
+                }
+            }
+        }
+    }
+}

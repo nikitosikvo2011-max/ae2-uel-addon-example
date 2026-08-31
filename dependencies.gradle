@@ -1,0 +1,11 @@
+// ============================================================
+// AE2 UEL Addon - Dependency Management
+// ============================================================
+// This file is included in the main build.gradle
+// Add custom dependencies here that are specific to your addon
+
+dependencies {
+    // Add your custom dependencies here
+    // Example:
+    // implementation 'com.your.library:artifact:version'
+}
